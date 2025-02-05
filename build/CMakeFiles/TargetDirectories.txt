@@ -1,0 +1,3 @@
+/Users/seaconcoding/Desktop/ajnikom/build/CMakeFiles/MyProject.dir
+/Users/seaconcoding/Desktop/ajnikom/build/CMakeFiles/edit_cache.dir
+/Users/seaconcoding/Desktop/ajnikom/build/CMakeFiles/rebuild_cache.dir
