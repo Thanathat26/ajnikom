@@ -59,86 +59,77 @@ int main(int argc, char** argv)
             circle(image, center, 5, Scalar(0, 0, 255), -1);
         }
     }
-
         
     if (boundingBox.area() > 10000)
     {
         int maxRadius = min(boundingBox.width, boundingBox.height) / 2;
         Mat polarImage;
         warpPolar(gray_image, polarImage, Size(360, maxRadius), center, maxRadius, INTER_LINEAR + WARP_FILL_OUTLIERS);
+        
         //  หา roi 
         int sidecan = 30; 
         Mat leftcut = Mat::zeros(polarImage.rows, sidecan, CV_8UC1);
         Mat rightcut = polarImage(Rect(polarImage.cols - sidecan, 0, sidecan, polarImage.rows));
         Mat Roi;
-        hconcat(leftcut,rightcut,Roi);
-        // namedWindow("Side Edges", 1);
-        // imshow("Side Edges", Roi);
-        //  หมุนภาพ
-        float angle = 90;
+        hconcat(leftcut, rightcut, Roi);
         
+        // หมุนภาพ
+        float angle = 90;        
         Point2f rotationCenter(Roi.cols / 2.0, Roi.rows / 2.0);
         Mat rotationMatrix = getRotationMatrix2D(rotationCenter, angle, 1.0);
         Mat rotate_roi;
         cout << "ก: " << Roi.cols << endl;
         cout << "ย: " << Roi.rows << endl;
-        //หนุนเเล้วใช้ roisize ภาพเลยโดนตังต้องสร้างrect ที่มีขนาดเท่ากับ ภาพ หลังจากปลิ้นขนาดมาเเล้ว ได้กว้าง 100 ยาว 354 ก็สร้าง rect ที่ขนาดตรงข้ามมาใส่
+        // กำหนดขนาดภาพหลังการหมุน
         Size rotatesize(100, 360);
         Rect bbox = RotatedRect(rotationCenter, rotatesize, angle).boundingRect();
         rotationMatrix.at<double>(0, 2) += bbox.width / 2.0 - rotationCenter.x;
         rotationMatrix.at<double>(1, 2) += bbox.height / 2.0 - rotationCenter.y;
-
-        warpAffine(Roi,rotate_roi,rotationMatrix,bbox.size());
+        warpAffine(Roi, rotate_roi, rotationMatrix, bbox.size());
         namedWindow("Rotated", 1);
         imshow("Rotated", rotate_roi);
 
         // 1. CLAHE Equalization
-Mat equalized;
-Ptr<CLAHE> clahe = createCLAHE();
-clahe->setClipLimit(4);
-clahe->apply(rotate_roi, equalized);
+        Mat equalized;
+        Ptr<CLAHE> clahe = createCLAHE();
+        clahe->setClipLimit(4);
+        clahe->apply(rotate_roi, equalized);
 
-// 2. คำนวณ Horizontal Projection (Histogram)
-Mat projection;
-reduce(equalized, projection, 0, REDUCE_SUM, CV_32SC1); // รวมความสว่างในแนวตั้ง
+        // 2. คำนวณ Horizontal Projection (Histogram)
+        Mat projection;
+        // รวมความสว่างในแนวตั้ง (ผลลัพธ์จะเป็นเวกเตอร์ 1 แถว)
+        reduce(equalized, projection, 0, REDUCE_SUM, CV_32SC1);
 
-// 3. ปรับสเกลค่าให้ตรงกับความสูงภาพ
-double minVal, maxVal;
-minMaxLoc(projection, &minVal, &maxVal);
-
-Mat histogramVis = Mat::zeros(equalized.size(), CV_8UC1); // ภาพขาวดำขนาดเดียวกับ ROI
-
-int h = histogramVis.rows;
-for (int x = 0; x < projection.cols; x++) {
-    int value = projection.at<int>(x);
-    int height = cvRound((value - minVal) * h / (maxVal - minVal)); // คำนวณความสูงบาร์
-    line(histogramVis, Point(x, h-1), Point(x, h-1 - height), Scalar(255), 1); // วาดบาร์ขาว
-}
-
-// 4. ตรวจจับส่วนยุบตัว (Dips) ด้วย Threshold
-Mat dips;
-threshold(histogramVis, dips, 250, 255, THRESH_BINARY_INV); // ส่วนยุบจะมีค่าต่ำ
-
-// 5. ประมวลผล Morphological เพื่อเน้นรอยแตก
-Mat kernel = getStructuringElement(MORPH_RECT, Size(3,5));
-morphologyEx(dips, dips, MORPH_CLOSE, kernel);
-
-// แสดงผลลัพธ์
+        // 3. ปรับสเกลเพื่อสร้างภาพ Histogram Visualization (ใช้สำหรับแสดงผล)
+        double minVal, maxVal;
+        minMaxLoc(projection, &minVal, &maxVal);
+        Mat histogramVis = Mat::zeros(equalized.size(), CV_8UC1); // ภาพขาวดำขนาดเดียวกับ ROI
+        int h = histogramVis.rows;
+        for (int x = 0; x < projection.cols; x++) {
+            int value = projection.at<int>(x);
+            int height = cvRound((value - minVal) * h / (maxVal - minVal + 1e-5)); // +1e-5 ป้องกันหารด้วย 0
+            line(histogramVis, Point(x, h-1), Point(x, h-1 - height), Scalar(255), 1); // วาดบาร์ขาว
+        }
         imshow("Histogram Graph", histogramVis);
 
-        //his 
-        imshow("Polar Transform", polarImage);
+        // 4. หาตำแหน่งที่มีค่าต่ำสุดใน Histogram โดยใช้ minMaxLoc
+        Point minLoc, maxLoc;
+        minMaxLoc(projection, NULL, NULL, &minLoc, &maxLoc);
+        int minX = minLoc.x;
+        cout << "ตำแหน่งคอลัมน์ที่มีค่าต่ำสุด: " << minX << endl;
+
+        // 5. กำหนดความกว้างของส่วนที่ต้องการ crop (สามารถปรับได้ตามความเหมาะสม)
+        int cropWidth = 60; // ตัวอย่างใช้ 50 พิกเซล
+        int startX = max(0, minX - cropWidth / 2);
+        if (startX + cropWidth > rotate_roi.cols)
+            startX = rotate_roi.cols - cropWidth;
+        Rect cropRect(startX, 0, cropWidth, rotate_roi.rows);
+        Mat croppedImage = rotate_roi(cropRect);
+        namedWindow("Cropped Image", 1);
+        imshow("Cropped Image", croppedImage);
+
+        // 6. (ถ้าต้องการ) สามารถประมวลผลภาพ croppedImage ต่อไปได้
     }
-
-
-    
-    // namedWindow("Contour Image", 1);
-    // namedWindow("Gray Scale Image", 1);
-    // namedWindow("Thresholded Image", 1);
-
-    // imshow("Contour Image", image);
-    // imshow("Gray Scale Image", gray_image);
-    // imshow("Thresholded Image", thresholded);
 
     waitKey(0);
     return 0;
