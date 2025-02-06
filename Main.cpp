@@ -127,6 +127,7 @@ int main(int argc, char** argv)
         Mat croppedImage = rotate_roi(cropRect);
         namedWindow("Cropped Image", 1);
         imshow("Cropped Image", croppedImage);
+        imwrite("cropped_output.png", croppedImage);
 
         // 6. (ถ้าต้องการ) สามารถประมวลผลภาพ croppedImage ต่อไปได้
     }
