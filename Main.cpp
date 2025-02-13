@@ -1,137 +1,139 @@
-#include <opencv2/core/core.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
+#include "opencv2/opencv.hpp"
 #include <iostream>
+#include <sstream>
+#include <vector>
 
 using namespace cv;
 using namespace std;
 
+// ฟังก์ชันคำนวณค่า Hu Moments
+double getHuMoment(vector<Point>& contour)
+{
+    Moments mu = moments(contour);
+    double hu[7];
+    HuMoments(mu, hu);
+    return hu[0];
+}
+
+// โครงสร้างข้อมูลติดตามผู้คน
+vector<vector<Point>> trails; // เก็บเส้น Trail ของแต่ละคน
+vector<int> objectIDs;        // เก็บ ID ของวัตถุที่ตรวจจับได้ในเฟรมก่อนหน้า
+const int MAX_TRAIL_LENGTH = 30; // จำกัดความยาวของเส้น Trail
+const int MAX_DISTANCE = 50;  // ระยะที่อนุญาตให้วัตถุเคลื่อนที่ระหว่างเฟรม (ใช้จับคู่ ID)
+
 int main(int argc, char** argv)
 {
-    if (argc != 2)
+    Mat fgMaskMOG2;
+    Ptr<BackgroundSubtractor> pMOG2 = createBackgroundSubtractorMOG2();
+
+    VideoCapture cap(argv[1]); // เปิดกล้องหรือไฟล์วิดีโอ
+    if (!cap.isOpened()) return -1;
+
+    namedWindow("frame with Bounding Box");
+    namedWindow("FG Mask MOG 2");
+
+    for (;;)
     {
-        cout << "Usage: " << argv[0] << " <image_path>" << endl;
-        return -1;
-    }
+        Mat frame;
+        cap >> frame;
+        if (frame.empty()) break;
 
-    Mat image = imread(argv[1]);
-    if (image.empty())
-    {
-        cout << "Could not open or find the image" << endl;
-        return -1;
-    }
+        // ใช้ Background Subtractor
+        pMOG2->apply(frame, fgMaskMOG2);
 
-    Mat gray_image;
-    cvtColor(image, gray_image, COLOR_BGR2GRAY);
+        // Threshold กรอง Noise
+        threshold(fgMaskMOG2, fgMaskMOG2, 220, 255, 0);
 
-    // ใช้ Sobel Gradient
-    Mat grad_x, grad_y;
-    Sobel(gray_image, grad_x, CV_16S, 1, 0, 3);
-    Sobel(gray_image, grad_y, CV_16S, 0, 1, 3);
+        // ทำ Morphological Operations
+        Mat erodedMask, dilatedMask;
+        erode(fgMaskMOG2, erodedMask, Mat(), Point(-1, -1), 2);
+        dilate(erodedMask, dilatedMask, Mat(), Point(-1, -1), 3);
 
-    convertScaleAbs(grad_x, grad_x);
-    convertScaleAbs(grad_y, grad_y);
+        // หาขอบเขต (Contours)
+        vector<vector<Point>> contours;
+        findContours(dilatedMask, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
-    Mat gradient;
-    addWeighted(grad_x, 0.5, grad_y, 0.5, 0, gradient);
-
-    // Threshold เพื่อตรวจจับขอบ
-    Mat thresholded;
-    threshold(gradient, thresholded, 50, 255, THRESH_BINARY);
-
-    // หา Contours
-    vector<vector<Point>> contours;
-    findContours(thresholded, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
-
-    Point2f center;
-    Rect boundingBox;
-    for (size_t i = 0; i < contours.size(); i++)
-    {
-        Rect tempBox = boundingRect(contours[i]);
-        
-        if (tempBox.area() > 10000)  
+        vector<Point> newCenters;
+        for (size_t i = 0; i < contours.size(); i++)
         {
-            boundingBox = tempBox;
-            center = Point2f(boundingBox.x + boundingBox.width / 2, 
-                             boundingBox.y + boundingBox.height / 2);
+            if (contourArea(contours[i]) < 250) continue; // กรอง Noise
 
-            rectangle(image, boundingBox, Scalar(0, 255, 0), 2);
-            circle(image, center, 5, Scalar(0, 0, 255), -1);
+            // คำนวณ Bounding Box
+            Rect bbox = boundingRect(contours[i]);
+            int padding = 10;
+            bbox.x = max(bbox.x - padding, 0);
+            bbox.y = max(bbox.y - padding, 0);
+            bbox.width = min(bbox.width + (2 * padding), frame.cols - bbox.x);
+            bbox.height = min(bbox.height + (2 * padding), frame.rows - bbox.y);
+
+            // คำนวณค่า Hu Moment
+            double huMoment = getHuMoment(contours[i]);
+
+            // คำนวณจุดศูนย์กลาง Bounding Box
+            Point objectCenter = Point(bbox.x + bbox.width / 2, bbox.y + bbox.height / 2);
+            newCenters.push_back(objectCenter);
+
+            // วาด Bounding Box
+            rectangle(frame, bbox, Scalar(0, 255, 0), 2);
+
+            // แสดงค่า Hu Moment บนภาพ
+            stringstream ss;
+            ss << "Hu : " << huMoment;
+            putText(frame, ss.str(), Point(bbox.x, bbox.y - 5), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 255, 255), 2);
         }
-    }
-        
-    if (boundingBox.area() > 10000)
-    {
-        int maxRadius = min(boundingBox.width, boundingBox.height) / 2;
-        Mat polarImage;
-        warpPolar(gray_image, polarImage, Size(360, maxRadius), center, maxRadius, INTER_LINEAR + WARP_FILL_OUTLIERS);
-        
-        //  หา roi 
-        int sidecan = 30; 
-        Mat leftcut = Mat::zeros(polarImage.rows, sidecan, CV_8UC1);
-        Mat rightcut = polarImage(Rect(polarImage.cols - sidecan, 0, sidecan, polarImage.rows));
-        Mat Roi;
-        hconcat(leftcut, rightcut, Roi);
-        
-        // หมุนภาพ
-        float angle = 90;        
-        Point2f rotationCenter(Roi.cols / 2.0, Roi.rows / 2.0);
-        Mat rotationMatrix = getRotationMatrix2D(rotationCenter, angle, 1.0);
-        Mat rotate_roi;
-        cout << "ก: " << Roi.cols << endl;
-        cout << "ย: " << Roi.rows << endl;
-        // กำหนดขนาดภาพหลังการหมุน
-        Size rotatesize(100, 360);
-        Rect bbox = RotatedRect(rotationCenter, rotatesize, angle).boundingRect();
-        rotationMatrix.at<double>(0, 2) += bbox.width / 2.0 - rotationCenter.x;
-        rotationMatrix.at<double>(1, 2) += bbox.height / 2.0 - rotationCenter.y;
-        warpAffine(Roi, rotate_roi, rotationMatrix, bbox.size());
-        namedWindow("Rotated", 1);
-        imshow("Rotated", rotate_roi);
 
-        // 1. CLAHE Equalization
-        Mat equalized;
-        Ptr<CLAHE> clahe = createCLAHE();
-        clahe->setClipLimit(4);
-        clahe->apply(rotate_roi, equalized);
+        // เชื่อมโยง Object ID กับศูนย์กลางของวัตถุใหม่
+        vector<int> newObjectIDs(newCenters.size(), -1);
+        vector<vector<Point>> newTrails(newCenters.size());
 
-        // 2. คำนวณ Horizontal Projection (Histogram)
-        Mat projection;
-        // รวมความสว่างในแนวตั้ง (ผลลัพธ์จะเป็นเวกเตอร์ 1 แถว)
-        reduce(equalized, projection, 0, REDUCE_SUM, CV_32SC1);
+        for (size_t i = 0; i < newCenters.size(); i++)
+        {
+            int bestMatch = -1;
+            double bestDistance = MAX_DISTANCE;
 
-        // 3. ปรับสเกลเพื่อสร้างภาพ Histogram Visualization (ใช้สำหรับแสดงผล)
-        double minVal, maxVal;
-        minMaxLoc(projection, &minVal, &maxVal);
-        Mat histogramVis = Mat::zeros(equalized.size(), CV_8UC1); // ภาพขาวดำขนาดเดียวกับ ROI
-        int h = histogramVis.rows;
-        for (int x = 0; x < projection.cols; x++) {
-            int value = projection.at<int>(x);
-            int height = cvRound((value - minVal) * h / (maxVal - minVal + 1e-5)); // +1e-5 ป้องกันหารด้วย 0
-            line(histogramVis, Point(x, h-1), Point(x, h-1 - height), Scalar(255), 1); // วาดบาร์ขาว
+            for (size_t j = 0; j < objectIDs.size(); j++)
+            {
+                double dist = norm(newCenters[i] - trails[j].back());
+                if (dist < bestDistance)
+                {
+                    bestMatch = j;
+                    bestDistance = dist;
+                }
+            }
+
+            if (bestMatch != -1)
+            {
+                newObjectIDs[i] = objectIDs[bestMatch];
+                newTrails[i] = trails[bestMatch];
+            }
+            else
+            {
+                newObjectIDs[i] = objectIDs.empty() ? 0 : (*max_element(objectIDs.begin(), objectIDs.end()) + 1);
+            }
+
+            newTrails[i].push_back(newCenters[i]);
+            if (newTrails[i].size() > MAX_TRAIL_LENGTH)
+                newTrails[i].erase(newTrails[i].begin());
         }
-        imshow("Histogram Graph", histogramVis);
 
-        // 4. หาตำแหน่งที่มีค่าต่ำสุดใน Histogram โดยใช้ minMaxLoc
-        Point minLoc, maxLoc;
-        minMaxLoc(projection, NULL, NULL, &minLoc, &maxLoc);
-        int minX = minLoc.x;
-        cout << "ตำแหน่งคอลัมน์ที่มีค่าต่ำสุด: " << minX << endl;
+        // อัปเดตค่า Trails และ Object IDs
+        trails = newTrails;
+        objectIDs = newObjectIDs;
 
-        // 5. กำหนดความกว้างของส่วนที่ต้องการ crop (สามารถปรับได้ตามความเหมาะสม)
-        int cropWidth = 60; // ตัวอย่างใช้ 50 พิกเซล
-        int startX = max(0, minX - cropWidth / 2);
-        if (startX + cropWidth > rotate_roi.cols)
-            startX = rotate_roi.cols - cropWidth;
-        Rect cropRect(startX, 0, cropWidth, rotate_roi.rows);
-        Mat croppedImage = rotate_roi(cropRect);
-        namedWindow("Cropped Image", 1);
-        imshow("Cropped Image", croppedImage);
-        imwrite("cropped_output.png", croppedImage);
+        // วาดเส้น Trail สำหรับทุกคน
+        for (const auto& trail : trails)
+        {
+            for (size_t i = 1; i < trail.size(); i++)
+            {
+                line(frame, trail[i - 1], trail[i], Scalar(0, 0, 255), 2);
+            }
+        }
 
-        // 6. (ถ้าต้องการ) สามารถประมวลผลภาพ croppedImage ต่อไปได้
+        imshow("FG Mask MOG 2", dilatedMask);
+        imshow("frame with Bounding Box", frame);
+
+        if (waitKey(20) >= 0) break;
     }
 
-    waitKey(0);
     return 0;
 }
